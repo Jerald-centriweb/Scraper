@@ -1,0 +1,462 @@
+{
+  "name": "Estate Scraper - Production Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Estate Scraper n8n Workflow - Fixed Version\n// This workflow polls Google Sheets, submits jobs to the API, and updates status\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const rowData = item.json;\n  \n  // Skip if not ready status\n  if (rowData.status !== 'ready') {\n    continue;\n  }\n  \n  // Prepare job payload\n  const jobPayload = {\n    client_name: rowData.client_name || 'Default Client',\n    area_name: rowData.area_name || 'Default Area',\n    country: rowData.country || 'AU',\n    buy_urls: rowData.buy_urls ? rowData.buy_urls.split(',').map(u => u.trim()) : [],\n    sold_urls: rowData.sold_urls ? rowData.sold_urls.split(',').map(u => u.trim()) : []\n  };\n  \n  results.push({\n    json: {\n      ...rowData,\n      jobPayload,\n      rowIndex: item.json.rowIndex || item.index\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "1",
+      "name": "Process Sheet Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PUBLIC_API_URL }}/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-job-token",
+              "value": "={{ $env.JOB_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "client_name",
+              "value": "={{ $json.jobPayload.client_name }}"
+            },
+            {
+              "name": "area_name",
+              "value": "={{ $json.jobPayload.area_name }}"
+            },
+            {
+              "name": "country",
+              "value": "={{ $json.jobPayload.country }}"
+            },
+            {
+              "name": "buy_urls",
+              "value": "={{ $json.jobPayload.buy_urls }}"
+            },
+            {
+              "name": "sold_urls",
+              "value": "={{ $json.jobPayload.sold_urls }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "2",
+      "name": "Submit Job to API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [440, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Process API responses and prepare status updates\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const response = item.json;\n  const originalData = item.json.body || item.json;\n  \n  let status = 'error';\n  let jobId = null;\n  let errorMessage = '';\n  \n  if (response.statusCode === 200 || response.statusCode === 201) {\n    const body = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;\n    if (body.success && body.jobId) {\n      status = 'processing';\n      jobId = body.jobId;\n    } else {\n      errorMessage = body.error || 'Unknown API error';\n    }\n  } else {\n    errorMessage = `HTTP ${response.statusCode}: ${response.statusMessage || 'Request failed'}`;\n  }\n  \n  results.push({\n    json: {\n      rowIndex: originalData.rowIndex,\n      status: status,\n      jobId: jobId,\n      errorMessage: errorMessage,\n      submittedAt: new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "3",
+      "name": "Process API Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "resource": "sheet",
+        "operation": "update",
+        "documentId": "YOUR_GOOGLE_SHEET_ID_HERE",
+        "sheetName": "Jobs",
+        "columnToMatchOn": "A",
+        "valueToMatchOn": "={{ $json.rowIndex }}",
+        "options": {
+          "locationDefine": "specifyRange",
+          "range": "D{{ $json.rowIndex }}:F{{ $json.rowIndex }}"
+        },
+        "dataToUpdate": "defineInNode",
+        "valuesToUpdate": {
+          "values": [
+            {
+              "column": "D",
+              "value": "={{ $json.status }}"
+            },
+            {
+              "column": "E", 
+              "value": "={{ $json.jobId || '' }}"
+            },
+            {
+              "column": "F",
+              "value": "={{ $json.errorMessage || '' }}"
+            }
+          ]
+        }
+      },
+      "id": "4",
+      "name": "Update Sheet Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [840, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "5",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [40, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": "YOUR_GOOGLE_SHEET_ID_HERE", 
+        "sheetName": "Jobs",
+        "options": {
+          "range": "A2:H100"
+        }
+      },
+      "id": "6",
+      "name": "Read Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [140, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PUBLIC_API_URL }}/jobs/{{ $json.jobId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "7",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [640, 500],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": "YOUR_GOOGLE_SHEET_ID_HERE",
+        "sheetName": "Jobs",
+        "options": {
+          "range": "A2:H100",
+          "valueRenderOption": "UNFORMATTED_VALUE"
+        }
+      },
+      "id": "8", 
+      "name": "Read Processing Jobs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [140, 500],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Filter for processing jobs that need status updates\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const rowData = item.json;\n  \n  // Only check jobs that are in processing status and have jobId\n  if (rowData.status === 'processing' && rowData.jobId) {\n    results.push({\n      json: {\n        ...rowData,\n        rowIndex: item.json.rowIndex || item.index + 2 // +2 for header row\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "9",
+      "name": "Filter Processing Jobs", 
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [240, 500]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Process job status responses\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const response = item.json;\n  const originalData = response.originalData || item.json;\n  \n  let status = 'processing'; // Default to keep processing\n  let progress = 0;\n  let resultData = '';\n  \n  if (response.statusCode === 200) {\n    const body = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;\n    \n    if (body.success) {\n      status = body.status || 'processing';\n      progress = body.progress || 0;\n      \n      if (status === 'completed') {\n        resultData = JSON.stringify(body.result || {});\n      } else if (status === 'failed') {\n        resultData = body.error || 'Job failed';\n      }\n    }\n  }\n  \n  // Only update if status changed from processing\n  if (status !== 'processing') {\n    results.push({\n      json: {\n        rowIndex: originalData.rowIndex,\n        status: status,\n        progress: progress,\n        resultData: resultData,\n        completedAt: new Date().toISOString()\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "10",
+      "name": "Process Status Response",
+      "type": "n8n-nodes-base.code", 
+      "typeVersion": 1,
+      "position": [840, 500]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "resource": "sheet", 
+        "operation": "update",
+        "documentId": "YOUR_GOOGLE_SHEET_ID_HERE",
+        "sheetName": "Jobs",
+        "columnToMatchOn": "A",
+        "valueToMatchOn": "={{ $json.rowIndex }}",
+        "options": {
+          "locationDefine": "specifyRange", 
+          "range": "D{{ $json.rowIndex }}:H{{ $json.rowIndex }}"
+        },
+        "dataToUpdate": "defineInNode",
+        "valuesToUpdate": {
+          "values": [
+            {
+              "column": "D",
+              "value": "={{ $json.status }}"
+            },
+            {
+              "column": "G",
+              "value": "={{ $json.progress || '' }}"
+            },
+            {
+              "column": "H", 
+              "value": "={{ $json.resultData || '' }}"
+            }
+          ]
+        }
+      },
+      "id": "11",
+      "name": "Update Completion Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1040, 500],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "12",
+      "name": "Status Check Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger", 
+      "typeVersion": 1,
+      "position": [40, 500]
+    },
+    {
+      "parameters": {
+        "webhookUrl": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "🏡 Estate Scraper Alert: Job {{ $json.jobId }} {{ $json.status }} for {{ $json.client_name }} - {{ $json.area_name }}"
+            }
+          ]
+        }
+      },
+      "id": "13",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1240, 400],
+      "continueOnFail": true,
+      "disabled": false
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Process Sheet Data",
+            "type": "main", 
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Sheet Data": {
+      "main": [
+        [
+          {
+            "node": "Submit Job to API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit Job to API": {
+      "main": [
+        [
+          {
+            "node": "Process API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process API Response": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Sheet Status": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status Check Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Processing Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Processing Jobs": {
+      "main": [
+        [
+          {
+            "node": "Filter Processing Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Processing Jobs": {
+      "main": [
+        [
+          {
+            "node": "Poll Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job Status": {
+      "main": [
+        [
+          {
+            "node": "Process Status Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Status Response": {
+      "main": [
+        [
+          {
+            "node": "Update Completion Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Completion Status": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 2,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

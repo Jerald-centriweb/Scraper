@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: estate-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  api:
+    build:
+      context: ../packages/api
+      dockerfile: Dockerfile
+    container_name: estate-api
+    restart: unless-stopped
+    ports:
+      - "${HOST_API_PORT:-3000}:3000"
+    env_file: .env
+    environment:
+      - PORT=3000
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../packages/worker
+      dockerfile: Dockerfile
+    container_name: estate-worker
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    shm_size: "1gb"
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=2048
+
+volumes:
+  redis_data:
+
+networks:
+  default:
+    name: estate-network
